@@ -1,4 +1,3 @@
-// Esto es una mierda odio arreglar el codigo
 #ifndef ASSETS_H
 #define ASSETS_H
 
@@ -57,36 +56,44 @@ extern const unsigned int btn2_glow_data[];
 
 typedef struct { short x, y, w, h, ox, oy; } SpriteFrame;
 extern const unsigned int sprites_data[];
-#define SPRITES_W 256
-#define SPRITES_H 720
-extern const SpriteFrame playerFrames[16];
-extern const SpriteFrame enemyFrames[7];
+#define SPRITES_W 512
+#define SPRITES_H 656
+extern const SpriteFrame playerFrames[13];
+extern const SpriteFrame player2Frames[13];
+extern const SpriteFrame npcFrames[8];
+extern const SpriteFrame barbFrames[7];
+extern const SpriteFrame thiefFrames[7];
 extern const SpriteFrame iconFrames[5];
-#define PF_IDLE0 0
-#define PF_IDLE1 1
-#define PF_WALK0 2
-#define PF_WALK1 3
-#define PF_WALK2 4
-#define PF_WALK3 5
-#define PF_JUMP 6
-#define PF_L0 7
-#define PF_L1 8
-#define PF_L2 9
-#define PF_H0 10
-#define PF_H1 11
-#define PF_H2 12
-#define PF_H3 13
-#define PF_BLOCK 14
-#define PF_HURT 15
-#define EF_IDLE0 0
-#define EF_IDLE1 1
-#define EF_WALK0 2
-#define EF_WALK1 3
-#define EF_WALK2 4
-#define EF_WALK3 5
+#define PF_IDLE 0
+#define PF_WALK0 1
+#define PF_WALK1 2
+#define PF_WALK2 3
+#define PF_JUMP 4
+#define PF_L0 5
+#define PF_L1 6
+#define PF_L2 7
+#define PF_H0 8
+#define PF_H1 9
+#define PF_H2 10
+#define PF_BLOCK 11
+#define PF_HURT 12
+#define NF_IDLE 0
+#define NF_WALK0 1
+#define NF_WALK1 2
+#define NF_WALK2 3
+#define NF_L0 4
+#define NF_L1 5
+#define NF_L2 6
+#define NF_HURT 7
+#define EF_IDLE 0
+#define EF_WALK0 1
+#define EF_WALK1 2
+#define EF_WALK2 3
+#define EF_ATKW 4
+#define EF_ATKS 5
 #define EF_HURT 6
 #define I_HEAD_GREEN 0
-#define I_HEAD_GRAY 1
+#define I_HEAD_RED 1
 #define I_POTION_RED 2
 #define I_POTION_BLUE 3
 #define I_FOOD 4
