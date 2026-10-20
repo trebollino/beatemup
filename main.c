@@ -57,8 +57,10 @@ static int curMusicLen = 0, musicPos = 0;
 
 static void initAudio(void) {
     int ret = 0;
-    SifLoadModule("rom0:LIBSD", 0, NULL);
-    SifExecModuleBuffer(audsrv_irx, size_audsrv_irx, 0, NULL, &ret);
+    int id = SifLoadModule("rom0:LIBSD", 0, NULL);
+    if (id < 0) { printf("No cargo LIBSD (%d)\n", id); return; }
+    id = SifExecModuleBuffer(audsrv_irx, size_audsrv_irx, 0, NULL, &ret);
+    if (id < 0) { printf("No cargo audsrv.irx (%d)\n", id); return; }
     if (audsrv_init() != 0) { printf("audsrv_init fallo\n"); return; }
     struct audsrv_fmt_t fmt;
     fmt.bits = 16;
@@ -706,6 +708,18 @@ static void drawGame(GSGLOBAL *gs) {
     }
 }
 
+// cuadrados verdes que avanzan mientras carga (sirve para ver donde se frena)
+static void bootStage(GSGLOBAL *gs, int n) {
+    for (int k = 0; k < 2; k++) {   // dos veces por el doble buffer
+        gsKit_clear(gs, COL(20, 20, 60));
+        for (int i = 0; i < 6; i++)
+            gsKit_prim_sprite(gs, 200 + i * 40, 210, 224 + i * 40, 234, 1,
+                              i < n ? COL(80, 220, 80) : COL(60, 60, 90));
+        gsKit_queue_exec(gs);
+        gsKit_sync_flip(gs);
+    }
+}
+
 int main(void) {
     GSGLOBAL *gs = gsKit_init_global();
     gs->PSM = GS_PSM_CT16;                 // 16 bits: deja memoria de video para las texturas
@@ -724,10 +738,20 @@ int main(void) {
     // mezcla normal: resultado = origen * alfa + destino * (1 - alfa)
     gsKit_set_primalpha(gs, GS_SETREG_ALPHA(0, 1, 0, 1, 0), 0);
 
+    bootStage(gs, 1);          // 1: pantalla lista
     initPad();
-    initAudio();
+    bootStage(gs, 2);          // 2: control listo
     resetGame();
     initMenu(gs);
+    bootStage(gs, 3);          // 3: imagenes cargadas
+
+    // dibuja el menu una vez y recien despues inicia el audio
+    for (int k = 0; k < 2; k++) {
+        drawMenu(gs);
+        gsKit_queue_exec(gs);
+        gsKit_sync_flip(gs);
+    }
+    initAudio();
     startMenuMusic();
 
     struct padButtonStatus buttons;
