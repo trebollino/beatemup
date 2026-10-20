@@ -1,6 +1,6 @@
 # USE_AUDIO = 1 activa musica y efectos de sonido. Si da error de compilacion
 # por el audio, cambialo a 0 (y el juego compila igual, sin sonido).
-USE_AUDIO = 1
+USE_AUDIO = 0
 
 EE_BIN = beatemup.elf
 EE_OBJS = main.o assets.o
