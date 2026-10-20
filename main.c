@@ -1,4 +1,4 @@
-// Beat 'em up 2.5D para PS2 - Base (Etapas 1 y 2)
+// castle crasher por trebollino (Etapas 1 y 2)
 // Controles (estilo Castle Crashers):
 //   Stick izq / D-pad = mover | X = saltar | Cuadrado = ataque suave
 //   Triangulo = ataque agresivo | Circulo = usar objeto | L2 = bloquear
@@ -7,6 +7,7 @@
 // Usa material de Castle Crashers: caballero armado con sus piezas, fuente, musica y efectos.
 // En el menu: cruceta/stick = elegir | X o START = aceptar
 // En el juego: START = pausa | en pausa, CIRCULO = volver al menu
+// 1 o 2 jugadores (boton de la llave en el menu). Caballeros grises = aliados (IA).
 
 #include <kernel.h>
 #include <sifrpc.h>
@@ -34,9 +35,10 @@
 #define WORLD_RIGHT   620
 
 #define GRAVITY 0.8f
-#define PLAYER_NAME "TREBOLLINO"   // cambia el nombre que aparece en el HUD
 
 static char padBuf[256] __attribute__((aligned(64)));
+static char padBuf2[256] __attribute__((aligned(64)));
+
 
 // =====================================================================
 //  AUDIO: musica y efectos (se desactiva con USE_AUDIO = 0 en el Makefile)
@@ -139,43 +141,6 @@ static void playSfx(int id) { (void)id; }
 static void audioUpdate(void) {}
 #endif
 
-typedef struct {
-    float x, y;      // x horizontal, y profundidad (en el suelo)
-    float z;         // altura (salto)
-    float vz;
-    int   facing;    // 1 derecha, -1 izquierda
-    int   hp;
-    int   attackTimer;   // >0 mientras golpea
-    int   hitDone;       // ya pego en este golpe
-    int   attackType;    // 0 nada, 1 suave, 2 agresivo
-    int   hurtTimer;     // parpadeo al recibir dano
-    float knockX;
-    int   moving;        // se esta moviendo (para animar)
-} Fighter;
-
-static Fighter player, enemy;
-static int enemyAlive = 1;
-static int respawnTimer = 0;
-
-static float mana = 100;
-static int magicTimer = 0;
-static int blocking = 0;
-static int paused = 0;
-static int selectedItem = 0;
-static int itemCount[3] = {3, 3, 3};   // 0 pocion vida, 1 pocion magia, 2 comida
-
-static int walkTick = 0;
-static int gameBg = 0;
-static int soonTimer = 0;
-
-static void damageEnemy(int dmg, float knock) {
-    enemy.hp -= dmg;
-    enemy.hurtTimer = 15;
-    enemy.knockX = knock;
-    playSfx(dmg >= 20 ? SFX_HIT_HEAVY : SFX_HIT_LIGHT);
-    if (enemy.hp <= 0) { enemyAlive = 0; respawnTimer = 120; playSfx(SFX_COIN); }
-}
-
 static u64 COL(int r, int g, int b) {
     return GS_SETREG_RGBAQ(r, g, b, 0x80, 0x00);
 }
@@ -257,7 +222,8 @@ static void initPad(void) {
     SifLoadModule("rom0:PADMAN", 0, NULL);
     padInit(0);
     padPortOpen(0, 0, padBuf);
-    // esperar a que el control este listo
+    padPortOpen(1, 0, padBuf2);        // control 2 (opcional)
+    // esperar a que el control 1 este listo
     int state;
     do {
         state = padGetState(0, 0);
@@ -269,94 +235,59 @@ static void initPad(void) {
     do {
         state = padGetState(0, 0);
     } while (state != PAD_STATE_STABLE && state != PAD_STATE_FINDCTP1);
+
+    // control 2: si esta conectado, tambien en modo analogico (sin esperar)
+    state = padGetState(1, 0);
+    if (state == PAD_STATE_STABLE || state == PAD_STATE_FINDCTP1)
+        padSetMainMode(1, 0, PAD_MMODE_DUALSHOCK, PAD_MMODE_LOCK);
 }
 
-static void resetGame(void) {
-    memset(&player, 0, sizeof(player));
-    player.x = 150; player.y = 360; player.facing = 1; player.hp = 100;
-    memset(&enemy, 0, sizeof(enemy));
-    enemy.x = 450; enemy.y = 360; enemy.facing = -1; enemy.hp = 60;
-    enemyAlive = 1;
-    mana = 100; magicTimer = 0; blocking = 0; selectedItem = 0;
-    itemCount[0] = itemCount[1] = itemCount[2] = 3;
-}
+// =====================================================================
+//  JUEGO: luchadores, IA y oleadas
+// =====================================================================
 
-static void drawFighterBox(GSGLOBAL *gs, Fighter *f, int r, int g, int b) {
-    // (respaldo con rectangulos si no entra la textura)
-    // escala por profundidad: mas abajo = mas grande
-    float t = (f->y - GROUND_TOP) / (float)(GROUND_BOTTOM - GROUND_TOP);
-    float s = 0.8f + 0.4f * t;
-    float w = 40 * s, h = 80 * s;
+enum { K_PLAYER, K_NPC, K_BARB, K_THIEF };
 
-    // sombra en el suelo
-    gsKit_prim_sprite(gs, f->x - w / 2, f->y - 4, f->x + w / 2, f->y + 4, 2, COL(20, 20, 20));
+typedef struct {
+    int   active;
+    int   kind;
+    int   team;          // 0 = aliados (jugadores y caballeros grises), 1 = enemigos
+    int   pidx;          // 0 / 1 = jugador 1 / 2, -1 = no es jugador
+    float x, y, z, vz;   // x horizontal, y profundidad (en el suelo), z altura (salto)
+    int   facing;        // 1 derecha, -1 izquierda
+    int   hp, maxhp;
+    int   attackTimer, attackType, hitDone;
+    int   hurtTimer;
+    float knockX;
+    int   moving;
+    int   cooldown;      // IA: espera entre ataques
+    int   deadTimer;     // >0: cayendo (parpadea y desaparece)
+    int   blocking, wasBlocking;
+    float mana;
+    int   magicTimer;
+    int   selectedItem;
+    int   itemCount[3];  // 0 pocion vida, 1 pocion magia, 2 comida
+} Fighter;
 
-    // parpadeo si esta herido
-    if (f->hurtTimer > 0 && (f->hurtTimer / 3) % 2 == 0) { r = 255; g = 255; b = 255; }
+#define MAX_F 16
+static Fighter F[MAX_F];          // 0 y 1 = jugadores, el resto = caballeros grises y enemigos
+static int numPlayers = 1;        // 1 o 2 jugadores (se cambia en el menu)
+static int wave = 0, waveTimer = 0, waveBanner = 0, kills = 0, gameOver = 0;
+static int paused = 0;
+static int walkTick = 0, gameBg = 0, soonTimer = 0;
 
-    float bx = f->x - w / 2;
-    float by = f->y - f->z - h;
-    gsKit_prim_sprite(gs, bx, by, bx + w, by + h, 3, COL(r, g, b));
+// ataques: duracion, ventana de golpe (hitLo..hitHi), dano, alcance, empuje
+typedef struct { int dur, hitLo, hitHi, dmg; float reach, knock; } AtkDef;
+static const AtkDef ATK[6] = {
+    {  0,  0,  0,  0,   0,  0 },
+    { 20,  9, 15, 10,  90,  8 },   // 1: suave (jugador)
+    { 34, 15, 25, 20, 105, 16 },   // 2: agresivo (jugador)
+    { 22,  9, 15,  8,  90,  7 },   // 3: caballero gris
+    { 36, 14, 22, 14,  95, 10 },   // 4: barbaro
+    { 26, 10, 16,  8, 100,  7 },   // 5: ladron
+};
 
-    // cabeza
-    gsKit_prim_sprite(gs, f->x - 10 * s, by - 18 * s, f->x + 10 * s, by, 3, COL(240, 200, 160));
-
-    // brazo de golpe
-    int armOn = (f->attackType == 2) ? (f->attackTimer > 14 && f->attackTimer < 26)
-                                     : (f->attackTimer > 0 && f->attackTimer < 14 && f->attackType == 1);
-    if (armOn) {
-        float ax = f->x + f->facing * (w / 2);
-        float ax2 = ax + f->facing * 35 * s;
-        float x1 = ax < ax2 ? ax : ax2;
-        float x2 = ax < ax2 ? ax2 : ax;
-        gsKit_prim_sprite(gs, x1, by + 15 * s, x2, by + 30 * s, 4, COL(255, 220, 120));
-    }
-
-    // escudo al bloquear (solo jugador)
-    if (f == &player && blocking) {
-        float sx = f->x + f->facing * (w / 2 + 4);
-        gsKit_prim_sprite(gs, sx - 6, by + 10 * s, sx + 6, by + h - 10 * s, 5, COL(180, 180, 200));
-    }
-}
-
-static void drawFighter(GSGLOBAL *gs, Fighter *f, int r, int g, int b) {
-    if (!texOk(&texSprites)) { drawFighterBox(gs, f, r, g, b); return; }
-
-    // escala por profundidad: mas abajo = mas grande
-    float t = (f->y - GROUND_TOP) / (float)(GROUND_BOTTOM - GROUND_TOP);
-    float s = 1.0f + 0.25f * t;
-
-    // sombra en el suelo (semitransparente)
-    gsKit_prim_sprite(gs, f->x - 26 * s, f->y - 5 * s, f->x + 26 * s, f->y + 5 * s, 2, COLA(0, 0, 0, 0x40));
-
-    const SpriteFrame *fr;
-    int tm = f->attackTimer;
-    if (f == &player) {
-        int fi;
-        if (f->hurtTimer > 0)            fi = PF_HURT;
-        else if (blocking)               fi = PF_BLOCK;
-        else if (f->attackType == 1)     fi = (tm > 15) ? PF_L0 : (tm > 7) ? PF_L1 : PF_L2;
-        else if (f->attackType == 2)     fi = (tm > 29) ? PF_H0 : (tm > 25) ? PF_H1 : (tm > 14) ? PF_H2 : PF_H3;
-        else if (f->z > 0)               fi = PF_JUMP;
-        else if (f->moving)              fi = PF_WALK0 + (walkTick / 6) % 4;
-        else                             fi = PF_IDLE0 + (walkTick / 30) % 2;
-        fr = &playerFrames[fi];
-    } else {
-        int fi;
-        if (f->hurtTimer > 0)            fi = EF_HURT;
-        else if (f->moving)              fi = EF_WALK0 + (walkTick / 8) % 4;
-        else                             fi = EF_IDLE0 + (walkTick / 30) % 2;
-        fr = &enemyFrames[fi];
-    }
-    drawSpriteFrame(gs, fr, f->x, f->y - f->z, s, f->facing < 0, TEXCOL(128, 128, 128, 128));
-}
-
-static void drawBar(GSGLOBAL *gs, int x, int y, int w, int hp, int maxhp, int r, int g, int b) {
-    if (hp < 0) hp = 0;
-    gsKit_prim_sprite(gs, x - 2, y - 2, x + w + 2, y + 14, 10, COL(0, 0, 0));
-    gsKit_prim_sprite(gs, x, y, x + w, y + 12, 11, COL(80, 0, 0));
-    gsKit_prim_sprite(gs, x, y, x + (w * hp) / maxhp, y + 12, 12, COL(r, g, b));
-}
+static int isAlive(Fighter *f) { return f->active && f->hp > 0 && f->deadTimer == 0; }
 
 static void clampFighter(Fighter *f) {
     if (f->x < WORLD_LEFT)  f->x = WORLD_LEFT;
@@ -365,16 +296,121 @@ static void clampFighter(Fighter *f) {
     if (f->y > GROUND_BOTTOM) f->y = GROUND_BOTTOM;
 }
 
-static void updatePlayer(u32 pressed, u32 held, int lx, int ly) {
+static void initPlayer(int idx, float x, float y) {
+    Fighter *f = &F[idx];
+    memset(f, 0, sizeof(*f));
+    f->active = 1; f->kind = K_PLAYER; f->team = 0; f->pidx = idx;
+    f->x = x; f->y = y; f->facing = 1;
+    f->hp = f->maxhp = 100;
+    f->mana = 100;
+    f->itemCount[0] = f->itemCount[1] = f->itemCount[2] = 3;
+}
+
+static void spawnFighter(int kind, float x, float y) {
+    int i;
+    for (i = 2; i < MAX_F; i++) if (!F[i].active) break;
+    if (i >= MAX_F) return;
+    Fighter *f = &F[i];
+    memset(f, 0, sizeof(*f));
+    f->active = 1; f->kind = kind; f->pidx = -1;
+    f->x = x; f->y = y;
+    f->team = (kind == K_NPC) ? 0 : 1;
+    f->facing = (kind == K_NPC) ? 1 : -1;
+    f->hp = f->maxhp = (kind == K_NPC) ? 90 : (kind == K_BARB) ? 70 : 40;
+    f->cooldown = 30 + rand() % 40;
+}
+
+static void resetGame(void) {
+    memset(F, 0, sizeof(F));
+    initPlayer(0, 150, 360);
+    if (numPlayers == 2) initPlayer(1, 100, 395);
+    spawnFighter(K_NPC, 60, 330);      // dos caballeros grises aliados
+    spawnFighter(K_NPC, 80, 410);
+    wave = 0; waveTimer = 90; waveBanner = 0; kills = 0; gameOver = 0; paused = 0;
+}
+
+static int countTeam(int team, int onlyNpc) {
+    int n = 0;
+    for (int i = 0; i < MAX_F; i++)
+        if (isAlive(&F[i]) && F[i].team == team && (!onlyNpc || F[i].kind == K_NPC)) n++;
+    return n;
+}
+
+// un luchador recibe un golpe de otro
+static void hurtFighter(Fighter *t, Fighter *src, int dmg, float knock) {
+    if (!isAlive(t)) return;
+    int dir = (t->x >= src->x) ? 1 : -1;
+    if (t->blocking && t->facing == -dir) {          // bloqueo: mira hacia el atacante
+        dmg = dmg / 5;
+        t->x += (knock / 3) * dir;
+        playSfx(SFX_BLOCK);
+    } else {
+        t->hurtTimer = 15;
+        t->knockX = knock * dir;
+        t->attackTimer = 0; t->attackType = 0;       // el golpe interrumpe
+        playSfx(dmg >= 14 ? SFX_HIT_HEAVY : SFX_HIT_LIGHT);
+    }
+    t->hp -= dmg;
+    if (t->hp <= 0) {
+        t->hp = 0;
+        t->deadTimer = 45;
+        if (t->team == 1) { kills++; playSfx(SFX_COIN); }
+    }
+}
+
+// aplica el golpe de 'a' a todos los enemigos que alcance
+static void attackHits(Fighter *a) {
+    if (a->attackType == 0 || a->hitDone) return;
+    const AtkDef *d = &ATK[a->attackType];
+    int t = a->attackTimer;
+    if (t < d->hitLo || t > d->hitHi) return;
+    int hit = 0;
+    for (int i = 0; i < MAX_F; i++) {
+        Fighter *b = &F[i];
+        if (b == a || !isAlive(b) || b->team == a->team) continue;
+        float dx = (b->x - a->x) * a->facing;
+        float dy = b->y - a->y;
+        float dz = a->z - b->z;
+        if (dx > -15 && dx < d->reach && dy > -24 && dy < 24 && dz > -40 && dz < 40) {
+            hurtFighter(b, a, d->dmg, d->knock);
+            hit = 1;
+        }
+    }
+    if (hit) a->hitDone = 1;
+}
+
+// ---------------------------------------------------------------------
+//  Jugador (con el control correspondiente)
+// ---------------------------------------------------------------------
+static void updatePlayerF(Fighter *p, u32 pressed, u32 held, int lx, int ly) {
+    if (!isAlive(p)) return;
+
+    // gravedad / salto
+    if (p->z > 0 || p->vz > 0) {
+        p->z += p->vz;
+        p->vz -= GRAVITY;
+        if (p->z <= 0) { p->z = 0; p->vz = 0; }
+    }
+
+    // herido: sin control, solo empuje
+    if (p->hurtTimer > 0) {
+        p->hurtTimer--;
+        p->x += p->knockX;
+        p->knockX *= 0.85f;
+        p->moving = 0;
+        p->blocking = 0;
+        clampFighter(p);
+        return;
+    }
+
     float speed = 3.0f;
     float dx = 0, dy = 0;
 
     // bloquear con L2 (en el suelo y sin atacar)
-    blocking = ((held & PAD_L2) && player.z == 0 && player.attackTimer == 0);
-    static int wasBlocking = 0;
-    if (blocking && !wasBlocking) playSfx(SFX_BLOCK);
-    wasBlocking = blocking;
-    player.moving = 0;
+    p->blocking = ((held & PAD_L2) && p->z == 0 && p->attackTimer == 0);
+    if (p->blocking && !p->wasBlocking) playSfx(SFX_BLOCK);
+    p->wasBlocking = p->blocking;
+    p->moving = 0;
 
     if (held & PAD_LEFT)  dx -= 1;
     if (held & PAD_RIGHT) dx += 1;
@@ -385,115 +421,241 @@ static void updatePlayer(u32 pressed, u32 held, int lx, int ly) {
     if (lx < 98)  dx = -1; else if (lx > 158) dx = 1;
     if (ly < 98)  dy = -1; else if (ly > 158) dy = 1;
 
-    // no moverse mientras golpea
-    if (player.attackTimer == 0 && !blocking) {
-        player.moving = (dx != 0 || dy != 0);
-        player.x += dx * speed;
-        player.y += dy * speed * 0.7f;
-        if (dx > 0) player.facing = 1;
-        if (dx < 0) player.facing = -1;
+    // no moverse mientras golpea o bloquea
+    if (p->attackTimer == 0 && !p->blocking) {
+        p->moving = (dx != 0 || dy != 0);
+        p->x += dx * speed;
+        p->y += dy * speed * 0.7f;
+        if (dx > 0) p->facing = 1;
+        if (dx < 0) p->facing = -1;
     }
 
-    // salto
-    if ((pressed & PAD_CROSS) && player.z == 0 && player.attackTimer == 0 && !blocking) {
-        player.vz = 12.0f;
+    // salto (X)
+    if ((pressed & PAD_CROSS) && p->z == 0 && p->attackTimer == 0 && !p->blocking) {
+        p->vz = 12.0f;
         playSfx(SFX_JUMP);
-    }
-    if (player.z > 0 || player.vz > 0) {
-        player.z += player.vz;
-        player.vz -= GRAVITY;
-        if (player.z <= 0) { player.z = 0; player.vz = 0; }
     }
 
     // ataque suave (Cuadrado) y agresivo (Triangulo)
-    if (player.attackTimer == 0 && !blocking) {
+    if (p->attackTimer == 0 && !p->blocking) {
         if (pressed & PAD_SQUARE) {
-            player.attackTimer = 20; player.attackType = 1; player.hitDone = 0;
+            p->attackTimer = ATK[1].dur; p->attackType = 1; p->hitDone = 0;
             playSfx(SFX_SWING_LIGHT);
         } else if (pressed & PAD_TRIANGLE) {
-            player.attackTimer = 34; player.attackType = 2; player.hitDone = 0;
+            p->attackTimer = ATK[2].dur; p->attackType = 2; p->hitDone = 0;
             playSfx(SFX_SWING_HEAVY);
         }
     }
-    if (player.attackTimer > 0) {
-        player.attackTimer--;
-        if (player.attackTimer == 0) player.attackType = 0;
+    if (p->attackTimer > 0) {
+        p->attackTimer--;
+        attackHits(p);
+        if (p->attackTimer == 0) p->attackType = 0;
     }
 
-    // magia (R2): cuesta 50 de mana, pega a distancia
-    if (mana < 100) mana += 0.1f;
-    if (magicTimer > 0) magicTimer--;
-    if ((pressed & PAD_R2) && mana >= 50 && magicTimer == 0) {
-        mana -= 50;
-        magicTimer = 30;
+    // magia (R2): cuesta 50 de mana y pega a todos los enemigos cercanos
+    if (p->mana < 100) p->mana += 0.1f;
+    if (p->magicTimer > 0) p->magicTimer--;
+    if ((pressed & PAD_R2) && p->mana >= 50 && p->magicTimer == 0) {
+        p->mana -= 50;
+        p->magicTimer = 30;
         playSfx(SFX_MAGIC);
-        if (enemyAlive) damageEnemy(25, 12.0f * (enemy.x >= player.x ? 1 : -1));
+        for (int i = 0; i < MAX_F; i++) {
+            Fighter *b = &F[i];
+            if (!isAlive(b) || b->team == p->team) continue;
+            float ddx = b->x - p->x, ddy = b->y - p->y;
+            if (ddx > -240 && ddx < 240 && ddy > -90 && ddy < 90)
+                hurtFighter(b, p, 25, 12.0f);
+        }
     }
 
     // seleccionar objeto (L1 / R1) y usar objeto (Circulo)
-    if (pressed & PAD_R1) selectedItem = (selectedItem + 1) % 3;
-    if (pressed & PAD_L1) selectedItem = (selectedItem + 2) % 3;
-    if ((pressed & PAD_CIRCLE) && itemCount[selectedItem] > 0) {
-        itemCount[selectedItem]--;
+    if (pressed & PAD_R1) p->selectedItem = (p->selectedItem + 1) % 3;
+    if (pressed & PAD_L1) p->selectedItem = (p->selectedItem + 2) % 3;
+    if ((pressed & PAD_CIRCLE) && p->itemCount[p->selectedItem] > 0) {
+        p->itemCount[p->selectedItem]--;
         playSfx(SFX_ITEM);
-        if (selectedItem == 0) { player.hp += 40; if (player.hp > 100) player.hp = 100; }
-        else if (selectedItem == 1) { mana += 60; if (mana > 100) mana = 100; }
-        else { player.hp += 15; if (player.hp > 100) player.hp = 100; }
+        if (p->selectedItem == 0) { p->hp += 40; if (p->hp > p->maxhp) p->hp = p->maxhp; }
+        else if (p->selectedItem == 1) { p->mana += 60; if (p->mana > 100) p->mana = 100; }
+        else { p->hp += 15; if (p->hp > p->maxhp) p->hp = p->maxhp; }
     }
-    if (player.hurtTimer > 0) player.hurtTimer--;
 
-    clampFighter(&player);
+    clampFighter(p);
 }
 
-static void updateEnemy(void) {
-    if (!enemyAlive) {
-        if (--respawnTimer <= 0) {
-            memset(&enemy, 0, sizeof(enemy));
-            enemy.x = (player.x < 320) ? 560 : 80;
-            enemy.y = GROUND_TOP + rand() % (GROUND_BOTTOM - GROUND_TOP);
-            enemy.hp = 60; enemy.facing = -1;
-            enemyAlive = 1;
+// ---------------------------------------------------------------------
+//  IA: caballeros grises (aliados) y enemigos (barbaros y ladrones)
+// ---------------------------------------------------------------------
+static Fighter *nearestFoe(Fighter *a) {
+    Fighter *best = NULL;
+    float bd = 1e9f;
+    for (int i = 0; i < MAX_F; i++) {
+        Fighter *b = &F[i];
+        if (b == a || !isAlive(b) || b->team == a->team) continue;
+        float d = fabsf(b->x - a->x) + fabsf(b->y - a->y) * 2.0f;
+        if (d < bd) { bd = d; best = b; }
+    }
+    return best;
+}
+
+static void updateAI(Fighter *a, int idx) {
+    if (a->deadTimer > 0) {
+        if (--a->deadTimer == 0) a->active = 0;
+        return;
+    }
+    if (a->hurtTimer > 0) {
+        a->hurtTimer--;
+        a->x += a->knockX;
+        a->knockX *= 0.85f;
+        a->moving = 0;
+        clampFighter(a);
+        return;
+    }
+    a->knockX = 0;
+    a->moving = 0;
+
+    int atk = (a->kind == K_NPC) ? 3 : (a->kind == K_BARB) ? 4 : 5;
+    float speed = (a->kind == K_NPC) ? 1.6f : (a->kind == K_BARB) ? 1.0f : 1.7f;
+
+    if (a->attackTimer > 0) {
+        a->attackTimer--;
+        attackHits(a);
+        if (a->attackTimer == 0) {
+            a->attackType = 0;
+            a->cooldown = 45 + rand() % 50;
         }
         return;
     }
 
-    if (enemy.hurtTimer > 0) enemy.hurtTimer--;
-    enemy.moving = 0;
+    Fighter *t = nearestFoe(a);
+    if (!t) return;
 
-    // knockback
-    if (enemy.knockX != 0) {
-        enemy.x += enemy.knockX;
-        enemy.knockX *= 0.85f;
-        if (enemy.knockX > -0.3f && enemy.knockX < 0.3f) enemy.knockX = 0;
+    float ty = t->y + ((idx % 3) - 1) * 12;    // se reparten un poco en profundidad
+    float dx = t->x - a->x;
+    float dy = ty - a->y;
+    a->facing = (dx >= 0) ? 1 : -1;
+    if (a->cooldown > 0) a->cooldown--;
+
+    float range = ATK[atk].reach * 0.75f;
+    if (fabsf(dx) < range && fabsf(dy) < 14) {
+        if (a->cooldown <= 0) {
+            a->attackType = atk;
+            a->attackTimer = ATK[atk].dur;
+            a->hitDone = 0;
+        }
     } else {
-        // IA simple: acercarse al jugador
-        float ex = player.x - enemy.x;
-        float ey = player.y - enemy.y;
-        if (ex > 55) { enemy.x += 1.5f; enemy.facing = 1; }
-        else if (ex < -55) { enemy.x -= 1.5f; enemy.facing = -1; }
-        else enemy.facing = (ex >= 0) ? 1 : -1;
-        if (ey > 4) enemy.y += 1.0f;
-        else if (ey < -4) enemy.y -= 1.0f;
-        enemy.moving = (ex > 55 || ex < -55 || ey > 4 || ey < -4);
+        if (fabsf(dx) > range * 0.7f) { a->x += (dx > 0) ? speed : -speed; a->moving = 1; }
+        if (fabsf(dy) > 5) { a->y += ((dy > 0) ? speed : -speed) * 0.7f; a->moving = 1; }
     }
-    clampFighter(&enemy);
+    clampFighter(a);
 }
 
-static void checkHits(void) {
-    // golpe del jugador al enemigo
-    int t = player.attackTimer;
-    int inWindow = (player.attackType == 1) ? (t > 8 && t < 16)
-                 : (player.attackType == 2) ? (t > 14 && t < 26) : 0;
-    if (enemyAlive && inWindow && !player.hitDone) {
-        float dx = (enemy.x - player.x) * player.facing;
-        float dy = enemy.y - player.y;
-        float reach = (player.attackType == 2) ? 90 : 75;
-        if (dx > 0 && dx < reach && dy > -22 && dy < 22) {
-            int dmg = (player.attackType == 2) ? 20 : 10;
-            float kb = (player.attackType == 2) ? 16.0f : 8.0f;
-            damageEnemy(dmg, kb * player.facing);
-            player.hitDone = 1;
+// oleadas: cuando no quedan enemigos, llega la siguiente
+static void updateWaves(void) {
+    if (waveBanner > 0) waveBanner--;
+    if (countTeam(1, 0) > 0) { waveTimer = 120; return; }
+    if (--waveTimer > 0) return;
+
+    wave++;
+    waveBanner = 120;
+    waveTimer = 120;
+    int n = 2 + wave;
+    if (n > 6) n = 6;
+    for (int i = 0; i < n; i++) {
+        int kind = (i % 2 == 0) ? K_BARB : K_THIEF;
+        float x = WORLD_RIGHT - (i % 2) * 40;
+        float y = GROUND_TOP + 10 + rand() % (GROUND_BOTTOM - GROUND_TOP - 20);
+        spawnFighter(kind, x, y);
+    }
+    // refuerzos: siempre hay 2 caballeros grises
+    while (countTeam(0, 1) < 2)
+        spawnFighter(K_NPC, WORLD_LEFT + 20, GROUND_TOP + 20 + rand() % 90);
+}
+
+static void updateGame(u32 *pressed, u32 *held, int *lx, int *ly) {
+    walkTick++;
+    for (int p = 0; p < numPlayers; p++) {
+        if (!F[p].active) continue;
+        if (F[p].deadTimer > 0) { if (--F[p].deadTimer == 0) F[p].active = 0; continue; }
+        updatePlayerF(&F[p], pressed[p], held[p], lx[p], ly[p]);
+    }
+    for (int i = 2; i < MAX_F; i++)
+        if (F[i].active) updateAI(&F[i], i);
+    updateWaves();
+
+    int alive = 0;
+    for (int p = 0; p < numPlayers; p++) if (isAlive(&F[p])) alive++;
+    if (alive == 0 && !F[0].deadTimer && !F[1].deadTimer) gameOver = 1;
+}
+
+// ---------------------------------------------------------------------
+//  Dibujo de luchadores
+// ---------------------------------------------------------------------
+static void drawBar(GSGLOBAL *gs, int x, int y, int w, int hp, int maxhp, int r, int g, int b) {
+    if (hp < 0) hp = 0;
+    gsKit_prim_sprite(gs, x - 2, y - 2, x + w + 2, y + 14, 10, COL(0, 0, 0));
+    gsKit_prim_sprite(gs, x, y, x + w, y + 12, 11, COL(80, 0, 0));
+    gsKit_prim_sprite(gs, x, y, x + (w * hp) / maxhp, y + 12, 12, COL(r, g, b));
+}
+
+static void drawFighter(GSGLOBAL *gs, Fighter *f) {
+    // escala por profundidad: mas abajo = mas grande
+    float t = (f->y - GROUND_TOP) / (float)(GROUND_BOTTOM - GROUND_TOP);
+    float s = 1.35f + 0.3f * t;
+
+    if (f->deadTimer > 0 && (f->deadTimer / 3) % 2) return;   // parpadea al caer
+
+    // sombra en el suelo (semitransparente)
+    gsKit_prim_sprite(gs, f->x - 26 * s, f->y - 5 * s, f->x + 26 * s, f->y + 5 * s, 2, COLA(0, 0, 0, 0x40));
+
+    float top = f->y - f->z - 64 * s;   // cabeza (para barras y nombre)
+
+    if (!texOk(&texSprites)) {
+        // respaldo con rectangulos si no entra la textura
+        int r = f->team ? 200 : 40, g = f->team ? 60 : 120, b = f->team ? 40 : 220;
+        gsKit_prim_sprite(gs, f->x - 20 * s, f->y - f->z - 70 * s, f->x + 20 * s, f->y - f->z, 3, COL(r, g, b));
+    } else {
+        static const int walkSeq[4] = {0, 1, 2, 1};
+        int w = walkSeq[(walkTick / 7) % 4];
+        int tm = f->attackTimer;
+        const SpriteFrame *tab;
+        int fi;
+        int hurt = (f->hurtTimer > 0 || f->deadTimer > 0);
+
+        if (f->kind == K_PLAYER) {
+            tab = (f->pidx == 0) ? playerFrames : player2Frames;
+            if (hurt)                    fi = PF_HURT;
+            else if (f->blocking)        fi = PF_BLOCK;
+            else if (f->attackType == 1) fi = (tm > 15) ? PF_L0 : (tm > 7) ? PF_L1 : PF_L2;
+            else if (f->attackType == 2) fi = (tm > 25) ? PF_H0 : (tm > 14) ? PF_H1 : PF_H2;
+            else if (f->z > 0)           fi = PF_JUMP;
+            else if (f->moving)          fi = PF_WALK0 + w;
+            else                         fi = PF_IDLE;
+        } else if (f->kind == K_NPC) {
+            tab = npcFrames;
+            if (hurt)                    fi = NF_HURT;
+            else if (f->attackType == 3) fi = (tm > 15) ? NF_L0 : (tm > 7) ? NF_L1 : NF_L2;
+            else if (f->moving)          fi = NF_WALK0 + w;
+            else                         fi = NF_IDLE;
+        } else {
+            tab = (f->kind == K_BARB) ? barbFrames : thiefFrames;
+            if (hurt)                    fi = EF_HURT;
+            else if (f->attackType > 0)  fi = (tm > ATK[f->attackType].hitHi) ? EF_ATKW : EF_ATKS;
+            else if (f->moving)          fi = EF_WALK0 + w;
+            else                         fi = EF_IDLE;
         }
+        drawSpriteFrame(gs, &tab[fi], f->x, f->y - f->z, s, f->facing < 0, TEXCOL(128, 128, 128, 128));
+    }
+
+    // nombre del jugador / barra de vida de los demas
+    if (f->kind == K_PLAYER) {
+        const char *nm = (f->pidx == 0) ? "JUGADOR (1)" : "JUGADOR (2)";
+        drawTextCentered(gs, nm, f->x, top - 26, 0.6f, 120, 255, 120);
+    } else {
+        int bw = 40;
+        int bx = (int)(f->x - bw / 2), by = (int)(top - 8);
+        gsKit_prim_sprite(gs, bx - 1, by - 1, bx + bw + 1, by + 6, 10, COL(0, 0, 0));
+        gsKit_prim_sprite(gs, bx, by, bx + (bw * f->hp) / f->maxhp, by + 5, 11,
+                          f->team ? COL(230, 50, 40) : COL(80, 140, 240));
     }
 }
 
@@ -520,6 +682,7 @@ static MenuItem items[3];
 static int menuSel = 0;
 static int menuTick = 0;
 static int shakeTimer = 0;
+static u32 vramBase = 0;             // donde empiezan las texturas en la memoria de video
 
 static void loadTex(GSGLOBAL *gs, GSTEXTURE *t, const unsigned int *data, int w, int h) {
     memset(t, 0, sizeof(GSTEXTURE));
@@ -537,7 +700,21 @@ static void loadTex(GSGLOBAL *gs, GSTEXTURE *t, const unsigned int *data, int w,
     gsKit_texture_upload(gs, t);
 }
 
-static void initMenu(GSGLOBAL *gs) {
+static void initMenuItems(void) {
+    items[0] = (MenuItem){ BTN0_X, BTN0_Y, BTN0_W, BTN0_H, BTN0_CX, BTN0_CY,
+                           BTN0_GLOW_X, BTN0_GLOW_Y, BTN0_GLOW_W * 2, BTN0_GLOW_H * 2 };
+    items[1] = (MenuItem){ BTN1_X, BTN1_Y, BTN1_W, BTN1_H, BTN1_CX, BTN1_CY,
+                           BTN1_GLOW_X, BTN1_GLOW_Y, BTN1_GLOW_W * 2, BTN1_GLOW_H * 2 };
+    items[2] = (MenuItem){ BTN2_X, BTN2_Y, BTN2_W, BTN2_H, BTN2_CX, BTN2_CY,
+                           BTN2_GLOW_X, BTN2_GLOW_Y, BTN2_GLOW_W * 2, BTN2_GLOW_H * 2 };
+}
+
+// La memoria de video (4 MB) no alcanza para todo junto, asi que se cargan
+// las imagenes del menu o las del juego segun donde estemos.
+static void loadMenuResources(GSGLOBAL *gs) {
+    gs->CurrentPointer = vramBase;
+    memset(texBg, 0, sizeof(texBg));
+    memset(&texSprites, 0, sizeof(texSprites));
     FlushCache(0);
     loadTex(gs, &texBg[0], bg1_data, BG_TEX_W, BG_TEX_H);
     loadTex(gs, &texBg[1], bg2_data, BG_TEX_W, BG_TEX_H);
@@ -549,15 +726,20 @@ static void initMenu(GSGLOBAL *gs) {
     loadTex(gs, &texGlow[0], btn0_glow_data, BTN0_GLOW_W, BTN0_GLOW_H);
     loadTex(gs, &texGlow[1], btn1_glow_data, BTN1_GLOW_W, BTN1_GLOW_H);
     loadTex(gs, &texGlow[2], btn2_glow_data, BTN2_GLOW_W, BTN2_GLOW_H);
+    loadTex(gs, &texFont, font_data, FONT_W, FONT_H);
+}
+
+static void loadGameResources(GSGLOBAL *gs, int bg) {
+    gs->CurrentPointer = vramBase;
+    memset(texBg, 0, sizeof(texBg));
+    memset(&texLogo, 0, sizeof(texLogo));
+    memset(texBtn, 0, sizeof(texBtn));
+    memset(texGlow, 0, sizeof(texGlow));
+    FlushCache(0);
+    static const unsigned int *bgData[3] = { bg1_data, bg2_data, bg3_data };
+    loadTex(gs, &texBg[bg], bgData[bg], BG_TEX_W, BG_TEX_H);
     loadTex(gs, &texSprites, sprites_data, SPRITES_W, SPRITES_H);
     loadTex(gs, &texFont, font_data, FONT_W, FONT_H);
-
-    items[0] = (MenuItem){ BTN0_X, BTN0_Y, BTN0_W, BTN0_H, BTN0_CX, BTN0_CY,
-                           BTN0_GLOW_X, BTN0_GLOW_Y, BTN0_GLOW_W * 2, BTN0_GLOW_H * 2 };
-    items[1] = (MenuItem){ BTN1_X, BTN1_Y, BTN1_W, BTN1_H, BTN1_CX, BTN1_CY,
-                           BTN1_GLOW_X, BTN1_GLOW_Y, BTN1_GLOW_W * 2, BTN1_GLOW_H * 2 };
-    items[2] = (MenuItem){ BTN2_X, BTN2_Y, BTN2_W, BTN2_H, BTN2_CX, BTN2_CY,
-                           BTN2_GLOW_X, BTN2_GLOW_Y, BTN2_GLOW_W * 2, BTN2_GLOW_H * 2 };
 }
 
 // dibuja una textura escalada alrededor de (cx, cy)
@@ -577,7 +759,7 @@ static void drawBgImage(GSGLOBAL *gs, GSTEXTURE *t, int x) {
                               BG_TEX_W - 0.5f, BG_TEX_H - 0.5f, 1, TEXCOL(128, 128, 128, 128));
 }
 
-static void updateMenu(u32 navPressed, u32 pressed) {
+static void updateMenu(GSGLOBAL *gs, u32 navPressed, u32 pressed) {
     // fondo: cada imagen se queda quieta y luego se desliza hacia la izquierda
     if (++bgTimer >= BG_HOLD_FRAMES + BG_SLIDE_FRAMES) {
         bgTimer = 0;
@@ -598,14 +780,16 @@ static void updateMenu(u32 navPressed, u32 pressed) {
 
     if (pressed & (PAD_CROSS | PAD_START)) {
         playSfx(SFX_SELECT);
-        if (menuSel == 0) {
-            resetGame();
-            paused = 0;
+        if (menuSel == 0) {                 // Partida local
             gameBg = bgIndex;
+            loadGameResources(gs, gameBg);
+            resetGame();
             startGameMusic();
             state = STATE_GAME;
+        } else if (menuSel == 1) {          // llave: cambiar 1 / 2 jugadores
+            numPlayers = (numPlayers == 1) ? 2 : 1;
         } else {
-            shakeTimer = 18;   // todavia no hace nada: el boton "tiembla"
+            shakeTimer = 18;                // todavia no hace nada: el boton "tiembla"
             soonTimer = 90;
         }
     }
@@ -646,15 +830,52 @@ static void drawMenu(GSGLOBAL *gs) {
                       m->cx + dx, m->cy, s, TEXCOL(128, 128, 128, 128));
     }
 
-    // textos
+    // ---- textos ----
+    char buf[32];
+    sprintf(buf, "JUGADORES: %d", numPlayers);
+    drawText(gs, buf, 16, 304, 0.9f, 255, 230, 90);
+    if (menuSel == 1) drawText(gs, "X: CAMBIAR 1 / 2 JUGADORES", 16, 326, 0.7f, 255, 255, 255);
     drawText(gs, "X: ACEPTAR", 500, 410, 0.9f, 255, 255, 255);
     drawText(gs, audioStatus, 16, 410, 0.8f, 255, 255, 120);
-    if (soonTimer > 0) drawTextCentered(gs, "PROXIMAMENTE", 320, 330, 1.4f, 255, 230, 90);
+    if (soonTimer > 0) drawTextCentered(gs, "PROXIMAMENTE", 320, 350, 1.4f, 255, 230, 90);
 }
 
 // =====================================================================
-//  JUEGO
+//  PANTALLA DE JUEGO
 // =====================================================================
+
+static void drawPlayerHud(GSGLOBAL *gs, Fighter *p, int right) {
+    int hasIcons = texOk(&texSprites);
+    const char *name = (p->pidx == 0) ? "JUGADOR (1)" : "JUGADOR (2)";
+    int head = (p->pidx == 0) ? I_HEAD_GREEN : I_HEAD_RED;
+    int bx = right ? 392 : (hasIcons ? 58 : 20);
+
+    if (!right) {
+        drawIcon(gs, head, 14, 10);
+        drawText(gs, name, (float)bx, 4, 0.8f, 255, 255, 255);
+    } else {
+        drawIcon(gs, head, 592, 10);
+        drawText(gs, name, (float)(584 - textWidth(name, 0.8f)), 4, 0.8f, 255, 255, 255);
+    }
+    drawBar(gs, bx, 28, 180, p->hp, p->maxhp, right ? 230 : 50, right ? 70 : 220, right ? 60 : 60);
+    drawBar(gs, bx, 46, 180, (int)p->mana, 100, 60, 120, 240);
+
+    // objeto seleccionado: icono + cantidad
+    char buf[8];
+    sprintf(buf, "X%d", p->itemCount[p->selectedItem]);
+    if (hasIcons) {
+        int icon[3] = {I_POTION_RED, I_POTION_BLUE, I_FOOD};
+        if (!right) {
+            drawIcon(gs, icon[p->selectedItem], 16, 66);
+            drawText(gs, buf, 58, 76, 1.0f, 255, 255, 255);
+        } else {
+            drawIcon(gs, icon[p->selectedItem], 594, 66);
+            drawText(gs, buf, (float)(586 - textWidth(buf, 1.0f)), 76, 1.0f, 255, 255, 255);
+        }
+    } else {
+        drawText(gs, buf, right ? 560.0f : 20.0f, 70, 1.0f, 255, 255, 255);
+    }
+}
 
 static void drawGame(GSGLOBAL *gs) {
     gsKit_clear(gs, COL(40, 60, 100));
@@ -668,46 +889,42 @@ static void drawGame(GSGLOBAL *gs) {
         gsKit_prim_sprite(gs, 0, GROUND_TOP - 20, SCREEN_W, SCREEN_H, 0, COL(90, 80, 70));
     }
 
-    // ordenar por profundidad (el de mas abajo se dibuja encima)
-    if (!enemyAlive || player.y >= enemy.y) {
-        if (enemyAlive) drawFighter(gs, &enemy, 200, 40, 40);
-        drawFighter(gs, &player, 40, 120, 220);
-    } else {
-        drawFighter(gs, &player, 40, 120, 220);
-        drawFighter(gs, &enemy, 200, 40, 40);
+    // luchadores ordenados por profundidad (el de mas abajo se dibuja encima)
+    int order[MAX_F], n = 0;
+    for (int i = 0; i < MAX_F; i++) {
+        if (!F[i].active) continue;
+        int j = n++;
+        while (j > 0 && F[order[j - 1]].y > F[i].y) { order[j] = order[j - 1]; j--; }
+        order[j] = i;
     }
-
-    // HUD: retrato, nombre, barras y objeto seleccionado
-    int hasIcons = texOk(&texSprites);
-    int hx = hasIcons ? 58 : 20;
-    drawIcon(gs, I_HEAD_GREEN, 14, 10);
-    drawText(gs, PLAYER_NAME, (float)hx, 4, 0.8f, 255, 255, 255);
-    drawBar(gs, hx, 28, 180, player.hp, 100, 50, 220, 60);
-    drawBar(gs, hx, 46, 180, (int)mana, 100, 60, 120, 240);
-
-    // objeto seleccionado: icono + cantidad
-    if (hasIcons) {
-        int icon[3] = {I_POTION_RED, I_POTION_BLUE, I_FOOD};
-        drawIcon(gs, icon[selectedItem], 16, 66);
-        char buf[8];
-        sprintf(buf, "X%d", itemCount[selectedItem]);
-        drawText(gs, buf, 58, 76, 1.0f, 255, 255, 255);
-    } else {
-        int cr[3] = {220, 60, 60}, cg[3] = {40, 120, 200}, cb[3] = {40, 240, 60};
-        gsKit_prim_sprite(gs, 20, 62, 44, 86, 11, COL(cr[selectedItem], cg[selectedItem], cb[selectedItem]));
-        for (int i = 0; i < itemCount[selectedItem]; i++)
-            gsKit_prim_sprite(gs, 52 + i * 10, 70, 58 + i * 10, 78, 11, COL(255, 255, 255));
-    }
+    for (int k = 0; k < n; k++) drawFighter(gs, &F[order[k]]);
 
     // efecto de magia
-    if (magicTimer > 0 && (magicTimer / 2) % 2 == 0)
-        gsKit_prim_sprite(gs, player.x - 220, player.y - 70, player.x + 220, player.y - 40, 6, COL(255, 240, 80));
+    for (int p = 0; p < numPlayers; p++) {
+        Fighter *f = &F[p];
+        if (f->active && f->magicTimer > 0 && (f->magicTimer / 2) % 2 == 0)
+            gsKit_prim_sprite(gs, f->x - 240, f->y - 80, f->x + 240, f->y - 50, 6, COL(255, 240, 80));
+    }
 
-    // barra del enemigo (arriba a la derecha)
-    if (enemyAlive) {
-        drawIcon(gs, I_HEAD_GRAY, 592, 10);
-        drawText(gs, "CABALLERO GRIS", (float)(584 - textWidth("CABALLERO GRIS", 0.8f)), 4, 0.8f, 255, 255, 255);
-        drawBar(gs, 392, 28, 180, enemy.hp, 60, 230, 160, 40);
+    // HUD
+    drawPlayerHud(gs, &F[0], 0);
+    if (numPlayers == 2) drawPlayerHud(gs, &F[1], 1);
+
+    char buf[32];
+    sprintf(buf, "OLEADA %d", wave);
+    drawTextCentered(gs, buf, 320, 6, 0.8f, 255, 230, 90);
+    sprintf(buf, "BAJAS: %d", kills);
+    drawTextCentered(gs, buf, 320, 28, 0.7f, 255, 255, 255);
+    if (waveBanner > 0 && wave > 0) {
+        sprintf(buf, "OLEADA %d", wave);
+        drawTextCentered(gs, buf, 320, 130, 2.0f, 255, 230, 90);
+    }
+
+    // fin del juego
+    if (gameOver) {
+        gsKit_prim_sprite(gs, 0, 0, SCREEN_W, SCREEN_H, 19, COLA(0, 0, 0, 0x60));
+        drawTextCentered(gs, "FIN DEL JUEGO", 320, 150, 2.0f, 255, 90, 70);
+        drawTextCentered(gs, "START: VOLVER AL MENU", 320, 250, 1.0f, 255, 255, 255);
     }
 
     // pausa
@@ -737,6 +954,33 @@ static void bootStage(GSGLOBAL *gs, int n) {
     }
 }
 
+static struct padButtonStatus padStat;
+
+// lee un control (port 0 = jugador 1, port 1 = jugador 2)
+static void readPad(int port, u32 *old, u32 *held, u32 *pressed, int *lx, int *ly) {
+    *held = 0; *pressed = 0; *lx = 128; *ly = 128;
+    if (padGetState(port, 0) == PAD_STATE_STABLE) {
+        if (padRead(port, 0, &padStat)) {
+            *held = 0xffff ^ padStat.btns;
+            *pressed = *held & ~(*old);
+            *old = *held;
+            // usar el stick solo si el control esta en modo analogico
+            if (padInfoMode(port, 0, PAD_MODECURID, 0) == PAD_TYPE_DUALSHOCK) {
+                *lx = padStat.ljoy_h;
+                *ly = padStat.ljoy_v;
+            }
+        }
+    }
+}
+
+static void backToMenu(GSGLOBAL *gs) {
+    paused = 0;
+    state = STATE_MENU;
+    menuSel = 0;
+    loadMenuResources(gs);
+    startMenuMusic();
+}
+
 int main(void) {
     GSGLOBAL *gs = gsKit_init_global();
     gs->PSM = GS_PSM_CT16;                 // 16 bits: deja memoria de video para las texturas
@@ -754,12 +998,14 @@ int main(void) {
     gsKit_mode_switch(gs, GS_ONESHOT);
     // mezcla normal: resultado = origen * alfa + destino * (1 - alfa)
     gsKit_set_primalpha(gs, GS_SETREG_ALPHA(0, 1, 0, 1, 0), 0);
+    vramBase = gs->CurrentPointer;
 
     bootStage(gs, 1);          // 1: pantalla lista
     initPad();
     bootStage(gs, 2);          // 2: control listo
     resetGame();
-    initMenu(gs);
+    initMenuItems();
+    loadMenuResources(gs);
     bootStage(gs, 3);          // 3: imagenes cargadas
 
     // dibuja el menu una vez y recien despues inicia el audio
@@ -771,54 +1017,44 @@ int main(void) {
     initAudio();
     startMenuMusic();
 
-    struct padButtonStatus buttons;
-    u32 oldPad = 0, oldNav = 0;
+    srand(12345);
+    u32 oldPad[2] = {0, 0}, oldNav = 0;
 
     while (1) {
-        u32 held = 0, pressed = 0;
-        int lx = 128, ly = 128;
+        u32 held[2], pressed[2];
+        int lx[2], ly[2];
+        readPad(0, &oldPad[0], &held[0], &pressed[0], &lx[0], &ly[0]);
+        if (state == STATE_GAME && numPlayers == 2)
+            readPad(1, &oldPad[1], &held[1], &pressed[1], &lx[1], &ly[1]);
+        else { held[1] = pressed[1] = 0; lx[1] = ly[1] = 128; }
 
-        if (padGetState(0, 0) == PAD_STATE_STABLE) {
-            if (padRead(0, 0, &buttons)) {
-                held = 0xffff ^ buttons.btns;
-                pressed = held & ~oldPad;
-                oldPad = held;
-                // usar el stick solo si el control esta en modo analogico
-                if (padInfoMode(0, 0, PAD_MODECURID, 0) == PAD_TYPE_DUALSHOCK) {
-                    lx = buttons.ljoy_h;
-                    ly = buttons.ljoy_v;
-                }
-            }
-        }
-
-        // direcciones para el menu: cruceta + stick izquierdo
-        u32 navHeld = held;
-        if (lx < 98)  navHeld |= PAD_LEFT;
-        if (lx > 158) navHeld |= PAD_RIGHT;
-        if (ly < 98)  navHeld |= PAD_UP;
-        if (ly > 158) navHeld |= PAD_DOWN;
+        // direcciones para el menu: cruceta + stick izquierdo del control 1
+        u32 navHeld = held[0];
+        if (lx[0] < 98)  navHeld |= PAD_LEFT;
+        if (lx[0] > 158) navHeld |= PAD_RIGHT;
+        if (ly[0] < 98)  navHeld |= PAD_UP;
+        if (ly[0] > 158) navHeld |= PAD_DOWN;
         u32 navPressed = navHeld & ~oldNav;
         oldNav = navHeld;
 
         if (state == STATE_MENU) {
-            updateMenu(navPressed, pressed);
-            drawMenu(gs);
+            updateMenu(gs, navPressed, pressed[0]);
+            if (state == STATE_MENU) drawMenu(gs);
+            else drawGame(gs);                    // acaba de empezar la partida
         } else {
-            if (pressed & PAD_SELECT) resetGame();
-            if (pressed & PAD_START) paused = !paused;
-            if (paused && (pressed & PAD_CIRCLE)) {   // volver al menu desde la pausa
-                paused = 0;
-                state = STATE_MENU;
-                menuSel = 0;
-                startMenuMusic();
+            if (pressed[0] & PAD_SELECT) resetGame();
+            if (gameOver) {
+                if (pressed[0] & PAD_START) backToMenu(gs);
+            } else {
+                if ((pressed[0] | pressed[1]) & PAD_START) paused = !paused;
+                if (paused && (pressed[0] & PAD_CIRCLE)) backToMenu(gs);
             }
-            if (!paused && state == STATE_GAME) {
-                walkTick++;
-                updatePlayer(pressed, held, lx, ly);
-                updateEnemy();
-                checkHits();
+            if (state == STATE_GAME) {
+                if (!paused && !gameOver) updateGame(pressed, held, lx, ly);
+                drawGame(gs);
+            } else {
+                drawMenu(gs);                     // volvio al menu
             }
-            drawGame(gs);
         }
 
         audioUpdate();
