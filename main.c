@@ -1,5 +1,8 @@
 // Beat 'em up 2.5D para PS2 - Base (Etapas 1 y 2)
-// Controles: D-pad o stick izq = mover | X = golpe | O = salto | START = reiniciar enemigo
+// Controles (estilo Castle Crashers):
+//   Stick izq / D-pad = mover | X = saltar | Cuadrado = ataque suave
+//   Triangulo = ataque agresivo | Circulo = usar objeto | L2 = bloquear
+//   R2 = magia | L1/R1 = seleccionar objeto | START = pausa | SELECT = reiniciar
 // Todo se dibuja con rectangulos de colores. Los sprites se agregan despues.
 
 #include <kernel.h>
@@ -33,6 +36,7 @@ typedef struct {
     int   hp;
     int   attackTimer;   // >0 mientras golpea
     int   hitDone;       // ya pego en este golpe
+    int   attackType;    // 0 nada, 1 suave, 2 agresivo
     int   hurtTimer;     // parpadeo al recibir dano
     float knockX;
 } Fighter;
@@ -40,6 +44,20 @@ typedef struct {
 static Fighter player, enemy;
 static int enemyAlive = 1;
 static int respawnTimer = 0;
+
+static float mana = 100;
+static int magicTimer = 0;
+static int blocking = 0;
+static int paused = 0;
+static int selectedItem = 0;
+static int itemCount[3] = {3, 3, 3};   // 0 pocion vida, 1 pocion magia, 2 comida
+
+static void damageEnemy(int dmg, float knock) {
+    enemy.hp -= dmg;
+    enemy.hurtTimer = 15;
+    enemy.knockX = knock;
+    if (enemy.hp <= 0) { enemyAlive = 0; respawnTimer = 120; }
+}
 
 static u64 COL(int r, int g, int b) {
     return GS_SETREG_RGBAQ(r, g, b, 0x80, 0x00);
@@ -64,6 +82,8 @@ static void resetGame(void) {
     memset(&enemy, 0, sizeof(enemy));
     enemy.x = 450; enemy.y = 360; enemy.facing = -1; enemy.hp = 60;
     enemyAlive = 1;
+    mana = 100; magicTimer = 0; blocking = 0; selectedItem = 0;
+    itemCount[0] = itemCount[1] = itemCount[2] = 3;
 }
 
 static void drawFighter(GSGLOBAL *gs, Fighter *f, int r, int g, int b) {
@@ -86,12 +106,20 @@ static void drawFighter(GSGLOBAL *gs, Fighter *f, int r, int g, int b) {
     gsKit_prim_sprite(gs, f->x - 10 * s, by - 18 * s, f->x + 10 * s, by, 3, COL(240, 200, 160));
 
     // brazo de golpe
-    if (f->attackTimer > 0 && f->attackTimer < 14) {
+    int armOn = (f->attackType == 2) ? (f->attackTimer > 14 && f->attackTimer < 26)
+                                     : (f->attackTimer > 0 && f->attackTimer < 14 && f->attackType == 1);
+    if (armOn) {
         float ax = f->x + f->facing * (w / 2);
         float ax2 = ax + f->facing * 35 * s;
         float x1 = ax < ax2 ? ax : ax2;
         float x2 = ax < ax2 ? ax2 : ax;
         gsKit_prim_sprite(gs, x1, by + 15 * s, x2, by + 30 * s, 4, COL(255, 220, 120));
+    }
+
+    // escudo al bloquear (solo jugador)
+    if (f == &player && blocking) {
+        float sx = f->x + f->facing * (w / 2 + 4);
+        gsKit_prim_sprite(gs, sx - 6, by + 10 * s, sx + 6, by + h - 10 * s, 5, COL(180, 180, 200));
     }
 }
 
@@ -113,6 +141,9 @@ static void updatePlayer(u32 pressed, u32 held, int lx, int ly) {
     float speed = 3.0f;
     float dx = 0, dy = 0;
 
+    // bloquear con L2 (en el suelo y sin atacar)
+    blocking = ((held & PAD_L2) && player.z == 0 && player.attackTimer == 0);
+
     if (held & PAD_LEFT)  dx -= 1;
     if (held & PAD_RIGHT) dx += 1;
     if (held & PAD_UP)    dy -= 1;
@@ -123,7 +154,7 @@ static void updatePlayer(u32 pressed, u32 held, int lx, int ly) {
     if (ly < 98)  dy = -1; else if (ly > 158) dy = 1;
 
     // no moverse mientras golpea
-    if (player.attackTimer == 0) {
+    if (player.attackTimer == 0 && !blocking) {
         player.x += dx * speed;
         player.y += dy * speed * 0.7f;
         if (dx > 0) player.facing = 1;
@@ -131,7 +162,7 @@ static void updatePlayer(u32 pressed, u32 held, int lx, int ly) {
     }
 
     // salto
-    if ((pressed & PAD_CIRCLE) && player.z == 0 && player.attackTimer == 0) {
+    if ((pressed & PAD_CROSS) && player.z == 0 && player.attackTimer == 0 && !blocking) {
         player.vz = 12.0f;
     }
     if (player.z > 0 || player.vz > 0) {
@@ -140,12 +171,37 @@ static void updatePlayer(u32 pressed, u32 held, int lx, int ly) {
         if (player.z <= 0) { player.z = 0; player.vz = 0; }
     }
 
-    // golpe
-    if ((pressed & PAD_CROSS) && player.attackTimer == 0) {
-        player.attackTimer = 20;
-        player.hitDone = 0;
+    // ataque suave (Cuadrado) y agresivo (Triangulo)
+    if (player.attackTimer == 0 && !blocking) {
+        if (pressed & PAD_SQUARE) {
+            player.attackTimer = 20; player.attackType = 1; player.hitDone = 0;
+        } else if (pressed & PAD_TRIANGLE) {
+            player.attackTimer = 34; player.attackType = 2; player.hitDone = 0;
+        }
     }
-    if (player.attackTimer > 0) player.attackTimer--;
+    if (player.attackTimer > 0) {
+        player.attackTimer--;
+        if (player.attackTimer == 0) player.attackType = 0;
+    }
+
+    // magia (R2): cuesta 50 de mana, pega a distancia
+    if (mana < 100) mana += 0.1f;
+    if (magicTimer > 0) magicTimer--;
+    if ((pressed & PAD_R2) && mana >= 50 && magicTimer == 0) {
+        mana -= 50;
+        magicTimer = 30;
+        if (enemyAlive) damageEnemy(25, 12.0f * (enemy.x >= player.x ? 1 : -1));
+    }
+
+    // seleccionar objeto (L1 / R1) y usar objeto (Circulo)
+    if (pressed & PAD_R1) selectedItem = (selectedItem + 1) % 3;
+    if (pressed & PAD_L1) selectedItem = (selectedItem + 2) % 3;
+    if ((pressed & PAD_CIRCLE) && itemCount[selectedItem] > 0) {
+        itemCount[selectedItem]--;
+        if (selectedItem == 0) { player.hp += 40; if (player.hp > 100) player.hp = 100; }
+        else if (selectedItem == 1) { mana += 60; if (mana > 100) mana = 100; }
+        else { player.hp += 15; if (player.hp > 100) player.hp = 100; }
+    }
     if (player.hurtTimer > 0) player.hurtTimer--;
 
     clampFighter(&player);
@@ -185,15 +241,18 @@ static void updateEnemy(void) {
 
 static void checkHits(void) {
     // golpe del jugador al enemigo
-    if (enemyAlive && player.attackTimer > 8 && player.attackTimer < 16 && !player.hitDone) {
+    int t = player.attackTimer;
+    int inWindow = (player.attackType == 1) ? (t > 8 && t < 16)
+                 : (player.attackType == 2) ? (t > 14 && t < 26) : 0;
+    if (enemyAlive && inWindow && !player.hitDone) {
         float dx = (enemy.x - player.x) * player.facing;
         float dy = enemy.y - player.y;
-        if (dx > 0 && dx < 75 && dy > -22 && dy < 22) {
-            enemy.hp -= 10;
-            enemy.hurtTimer = 15;
-            enemy.knockX = 8.0f * player.facing;
+        float reach = (player.attackType == 2) ? 90 : 75;
+        if (dx > 0 && dx < reach && dy > -22 && dy < 22) {
+            int dmg = (player.attackType == 2) ? 20 : 10;
+            float kb = (player.attackType == 2) ? 16.0f : 8.0f;
+            damageEnemy(dmg, kb * player.facing);
             player.hitDone = 1;
-            if (enemy.hp <= 0) { enemyAlive = 0; respawnTimer = 120; }
         }
     }
 }
@@ -232,11 +291,14 @@ int main(void) {
             }
         }
 
-        if (pressed & PAD_START) resetGame();
+        if (pressed & PAD_SELECT) resetGame();
+        if (pressed & PAD_START) paused = !paused;
 
-        updatePlayer(pressed, held, lx, ly);
-        updateEnemy();
-        checkHits();
+        if (!paused) {
+            updatePlayer(pressed, held, lx, ly);
+            updateEnemy();
+            checkHits();
+        }
 
         // ---- dibujo ----
         gsKit_clear(gs, COL(40, 60, 100));
@@ -256,6 +318,25 @@ int main(void) {
 
         // HUD
         drawBar(gs, 20, 20, 200, player.hp, 100, 50, 220, 60);
+        drawBar(gs, 20, 40, 200, (int)mana, 100, 60, 120, 240);
+
+        // objeto seleccionado: cuadro de color + un punto por cada unidad
+        {
+            int cr[3] = {220, 60, 60}, cg[3] = {40, 120, 200}, cb[3] = {40, 240, 60};
+            gsKit_prim_sprite(gs, 20, 62, 44, 86, 11, COL(cr[selectedItem], cg[selectedItem], cb[selectedItem]));
+            for (int i = 0; i < itemCount[selectedItem]; i++)
+                gsKit_prim_sprite(gs, 52 + i * 10, 70, 58 + i * 10, 78, 11, COL(255, 255, 255));
+        }
+
+        // efecto de magia
+        if (magicTimer > 0 && (magicTimer / 2) % 2 == 0)
+            gsKit_prim_sprite(gs, player.x - 220, player.y - 70, player.x + 220, player.y - 40, 6, COL(255, 240, 80));
+
+        // pausa: dos barras en el centro
+        if (paused) {
+            gsKit_prim_sprite(gs, 295, 190, 315, 250, 20, COL(255, 255, 255));
+            gsKit_prim_sprite(gs, 335, 190, 355, 250, 20, COL(255, 255, 255));
+        }
         if (enemyAlive) drawBar(gs, 420, 20, 200, enemy.hp, 60, 230, 160, 40);
 
         gsKit_queue_exec(gs);
