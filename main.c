@@ -3,7 +3,9 @@
 //   Stick izq / D-pad = mover | X = saltar | Cuadrado = ataque suave
 //   Triangulo = ataque agresivo | Circulo = usar objeto | L2 = bloquear
 //   R2 = magia | L1/R1 = seleccionar objeto | START = pausa | SELECT = reiniciar
-// Todo se dibuja con rectangulos de colores. Los sprites se agregan despues.
+// Menu principal con fondos que se deslizan, botones con glow y navegacion con cruceta/stick.
+// En el menu: cruceta/stick = elegir | X o START = aceptar
+// En el juego: START = pausa | en pausa, CIRCULO = volver al menu
 
 #include <kernel.h>
 #include <sifrpc.h>
@@ -14,6 +16,8 @@
 #include <gsKit.h>
 #include <dmaKit.h>
 #include <libpad.h>
+#include <math.h>
+#include "assets.h"
 
 #define SCREEN_W 640
 #define SCREEN_H 448
@@ -264,12 +268,200 @@ static void checkHits(void) {
     }
 }
 
+// =====================================================================
+//  MENU PRINCIPAL
+// =====================================================================
+
+typedef enum { STATE_MENU, STATE_GAME } GameState;
+static GameState state = STATE_MENU;
+
+// Formato de color para sprites con textura (0x80 = 1.0)
+#define TEXCOL(r, g, b, a) GS_SETREG_RGBAQ((r), (g), (b), (a), 0x00)
+
+// ---- Ajustes del fondo animado (60 cuadros = 1 segundo) ----
+#define BG_HOLD_FRAMES  240   // tiempo que se queda quieta cada imagen (4 s)
+#define BG_SLIDE_FRAMES 30    // duracion del deslizamiento (0,5 s)
+// Para que deslice sin pausa, poner BG_HOLD_FRAMES en 0.
+
+static GSTEXTURE texBg[3], texLogo, texBtn[3], texGlow[3];
+static int bgIndex = 0, bgTimer = 0;
+
+typedef struct {
+    float x, y, w, h, cx, cy;        // boton
+    float gx, gy, gw, gh;            // glow
+} MenuItem;
+
+static MenuItem items[3];
+static int menuSel = 0;
+static int menuTick = 0;
+static int shakeTimer = 0;
+
+static void loadTex(GSGLOBAL *gs, GSTEXTURE *t, const unsigned int *data, int w, int h) {
+    memset(t, 0, sizeof(GSTEXTURE));
+    t->Width = w;
+    t->Height = h;
+    t->PSM = GS_PSM_CT32;
+    t->Mem = (u32 *)data;
+    t->Filter = GS_FILTER_LINEAR;
+    t->Vram = gsKit_vram_alloc(gs, gsKit_texture_size(w, h, GS_PSM_CT32), GSKIT_ALLOC_USERBUFFER);
+    if (t->Vram == GSKIT_ALLOC_ERROR) {
+        printf("Sin VRAM para textura %dx%d\n", w, h);
+        return;
+    }
+    gsKit_texture_upload(gs, t);
+}
+
+static void initMenu(GSGLOBAL *gs) {
+    FlushCache(0);
+    loadTex(gs, &texBg[0], bg1_data, BG_TEX_W, BG_TEX_H);
+    loadTex(gs, &texBg[1], bg2_data, BG_TEX_W, BG_TEX_H);
+    loadTex(gs, &texBg[2], bg3_data, BG_TEX_W, BG_TEX_H);
+    loadTex(gs, &texLogo, logo_data, LOGO_W, LOGO_H);
+    loadTex(gs, &texBtn[0], btn0_data, BTN0_W, BTN0_H);
+    loadTex(gs, &texBtn[1], btn1_data, BTN1_W, BTN1_H);
+    loadTex(gs, &texBtn[2], btn2_data, BTN2_W, BTN2_H);
+    loadTex(gs, &texGlow[0], btn0_glow_data, BTN0_GLOW_W, BTN0_GLOW_H);
+    loadTex(gs, &texGlow[1], btn1_glow_data, BTN1_GLOW_W, BTN1_GLOW_H);
+    loadTex(gs, &texGlow[2], btn2_glow_data, BTN2_GLOW_W, BTN2_GLOW_H);
+
+    items[0] = (MenuItem){ BTN0_X, BTN0_Y, BTN0_W, BTN0_H, BTN0_CX, BTN0_CY,
+                           BTN0_GLOW_X, BTN0_GLOW_Y, BTN0_GLOW_W * 2, BTN0_GLOW_H * 2 };
+    items[1] = (MenuItem){ BTN1_X, BTN1_Y, BTN1_W, BTN1_H, BTN1_CX, BTN1_CY,
+                           BTN1_GLOW_X, BTN1_GLOW_Y, BTN1_GLOW_W * 2, BTN1_GLOW_H * 2 };
+    items[2] = (MenuItem){ BTN2_X, BTN2_Y, BTN2_W, BTN2_H, BTN2_CX, BTN2_CY,
+                           BTN2_GLOW_X, BTN2_GLOW_Y, BTN2_GLOW_W * 2, BTN2_GLOW_H * 2 };
+}
+
+// dibuja una textura escalada alrededor de (cx, cy)
+static void drawTexScaled(GSGLOBAL *gs, GSTEXTURE *t, float x, float y, float w, float h,
+                          float cx, float cy, float s, u64 col) {
+    float x1 = cx + (x - cx) * s;
+    float y1 = cy + (y - cy) * s;
+    float x2 = cx + (x + w - cx) * s;
+    float y2 = cy + (y + h - cy) * s;
+    gsKit_prim_sprite_texture(gs, t, x1, y1, 0.0f, 0.0f, x2, y2,
+                              (float)t->Width, (float)t->Height, 2, col);
+}
+
+static void drawBgImage(GSGLOBAL *gs, GSTEXTURE *t, int x) {
+    gsKit_prim_sprite_texture(gs, t, (float)x, 0.0f, 0.5f, 0.5f,
+                              (float)(x + SCREEN_W), (float)SCREEN_H,
+                              BG_TEX_W - 0.5f, BG_TEX_H - 0.5f, 1, TEXCOL(128, 128, 128, 128));
+}
+
+static void updateMenu(u32 navPressed, u32 pressed) {
+    // fondo: cada imagen se queda quieta y luego se desliza hacia la izquierda
+    if (++bgTimer >= BG_HOLD_FRAMES + BG_SLIDE_FRAMES) {
+        bgTimer = 0;
+        bgIndex = (bgIndex + 1) % 3;
+    }
+    menuTick++;
+    if (shakeTimer > 0) shakeTimer--;
+
+    // navegacion: arriba = Partida local, abajo = botones de abajo
+    if ((navPressed & PAD_DOWN)  && menuSel == 0) menuSel = 1;
+    if ((navPressed & PAD_UP)    && menuSel != 0) menuSel = 0;
+    if ((navPressed & PAD_RIGHT) && menuSel == 1) menuSel = 2;
+    if ((navPressed & PAD_LEFT)  && menuSel == 2) menuSel = 1;
+
+    if (pressed & (PAD_CROSS | PAD_START)) {
+        if (menuSel == 0) {
+            resetGame();
+            paused = 0;
+            state = STATE_GAME;
+        } else {
+            shakeTimer = 18;   // todavia no hace nada: el boton "tiembla"
+        }
+    }
+}
+
+static void drawMenu(GSGLOBAL *gs) {
+    // ---- fondo deslizante ----
+    int offset = 0;
+    if (bgTimer >= BG_HOLD_FRAMES) {
+        float k = (float)(bgTimer - BG_HOLD_FRAMES) / (float)BG_SLIDE_FRAMES;
+        float e = k * k * (3.0f - 2.0f * k);   // suave al empezar y al terminar
+        offset = (int)(e * SCREEN_W);
+    }
+    drawBgImage(gs, &texBg[bgIndex], -offset);
+    if (offset > 0) drawBgImage(gs, &texBg[(bgIndex + 1) % 3], SCREEN_W - offset);
+
+    // ---- logo ----
+    gsKit_prim_sprite_texture(gs, &texLogo, LOGO_X, LOGO_Y, 0, 0,
+                              LOGO_X + LOGO_W, LOGO_Y + LOGO_H, LOGO_W, LOGO_H, 2,
+                              TEXCOL(128, 128, 128, 128));
+
+    // ---- botones ----
+    float pulse = 0.5f + 0.5f * sinf(menuTick * 0.12f);   // 0..1
+    for (int i = 0; i < 3; i++) {
+        MenuItem *m = &items[i];
+        float dx = 0;
+        float s = 1.0f;
+        if (i == menuSel) {
+            s = 1.03f + 0.02f * pulse;
+            if (shakeTimer > 0) dx = sinf(shakeTimer * 1.8f) * 4.0f;
+
+            // glow: se dibuja detras del boton, pulsando
+            int ga = (int)(128.0f * (0.55f + 0.45f * pulse));
+            drawTexScaled(gs, &texGlow[i], m->gx + dx, m->gy, m->gw, m->gh,
+                          m->cx + dx, m->cy, s, TEXCOL(128, 128, 128, ga));
+        }
+        drawTexScaled(gs, &texBtn[i], m->x + dx, m->y, m->w, m->h,
+                      m->cx + dx, m->cy, s, TEXCOL(128, 128, 128, 128));
+    }
+}
+
+// =====================================================================
+//  JUEGO
+// =====================================================================
+
+static void drawGame(GSGLOBAL *gs) {
+    gsKit_clear(gs, COL(40, 60, 100));
+    // cielo / fondo
+    gsKit_prim_sprite(gs, 0, 0, SCREEN_W, GROUND_TOP - 20, 0, COL(60, 90, 150));
+    // suelo
+    gsKit_prim_sprite(gs, 0, GROUND_TOP - 20, SCREEN_W, SCREEN_H, 0, COL(90, 80, 70));
+
+    // ordenar por profundidad (el de mas abajo se dibuja encima)
+    if (!enemyAlive || player.y >= enemy.y) {
+        if (enemyAlive) drawFighter(gs, &enemy, 200, 40, 40);
+        drawFighter(gs, &player, 40, 120, 220);
+    } else {
+        drawFighter(gs, &player, 40, 120, 220);
+        drawFighter(gs, &enemy, 200, 40, 40);
+    }
+
+    // HUD
+    drawBar(gs, 20, 20, 200, player.hp, 100, 50, 220, 60);
+    drawBar(gs, 20, 40, 200, (int)mana, 100, 60, 120, 240);
+
+    // objeto seleccionado: cuadro de color + un punto por cada unidad
+    {
+        int cr[3] = {220, 60, 60}, cg[3] = {40, 120, 200}, cb[3] = {40, 240, 60};
+        gsKit_prim_sprite(gs, 20, 62, 44, 86, 11, COL(cr[selectedItem], cg[selectedItem], cb[selectedItem]));
+        for (int i = 0; i < itemCount[selectedItem]; i++)
+            gsKit_prim_sprite(gs, 52 + i * 10, 70, 58 + i * 10, 78, 11, COL(255, 255, 255));
+    }
+
+    // efecto de magia
+    if (magicTimer > 0 && (magicTimer / 2) % 2 == 0)
+        gsKit_prim_sprite(gs, player.x - 220, player.y - 70, player.x + 220, player.y - 40, 6, COL(255, 240, 80));
+
+    // pausa: dos barras en el centro
+    if (paused) {
+        gsKit_prim_sprite(gs, 295, 190, 315, 250, 20, COL(255, 255, 255));
+        gsKit_prim_sprite(gs, 335, 190, 355, 250, 20, COL(255, 255, 255));
+    }
+    if (enemyAlive) drawBar(gs, 420, 20, 200, enemy.hp, 60, 230, 160, 40);
+}
+
 int main(void) {
     GSGLOBAL *gs = gsKit_init_global();
     gs->PSM = GS_PSM_CT24;
     gs->PSMZ = GS_PSMZ_16S;
     gs->DoubleBuffering = GS_SETTING_ON;
     gs->ZBuffering = GS_SETTING_OFF;
+    gs->PrimAlphaEnable = GS_SETTING_ON;   // transparencias (botones, glow)
 
     dmaKit_init(D_CTRL_RELE_OFF, D_CTRL_MFD_OFF, D_CTRL_STS_UNSPEC,
                 D_CTRL_STD_OFF, D_CTRL_RCYC_8, 1 << DMA_CHANNEL_GIF);
@@ -277,12 +469,15 @@ int main(void) {
 
     gsKit_init_screen(gs);
     gsKit_mode_switch(gs, GS_ONESHOT);
+    // mezcla normal: resultado = origen * alfa + destino * (1 - alfa)
+    gsKit_set_primalpha(gs, GS_SETREG_ALPHA(0, 1, 0, 1, 0), 0);
 
     initPad();
     resetGame();
+    initMenu(gs);
 
     struct padButtonStatus buttons;
-    u32 oldPad = 0;
+    u32 oldPad = 0, oldNav = 0;
 
     while (1) {
         u32 held = 0, pressed = 0;
@@ -301,53 +496,33 @@ int main(void) {
             }
         }
 
-        if (pressed & PAD_SELECT) resetGame();
-        if (pressed & PAD_START) paused = !paused;
+        // direcciones para el menu: cruceta + stick izquierdo
+        u32 navHeld = held;
+        if (lx < 98)  navHeld |= PAD_LEFT;
+        if (lx > 158) navHeld |= PAD_RIGHT;
+        if (ly < 98)  navHeld |= PAD_UP;
+        if (ly > 158) navHeld |= PAD_DOWN;
+        u32 navPressed = navHeld & ~oldNav;
+        oldNav = navHeld;
 
-        if (!paused) {
-            updatePlayer(pressed, held, lx, ly);
-            updateEnemy();
-            checkHits();
-        }
-
-        // ---- dibujo ----
-        gsKit_clear(gs, COL(40, 60, 100));
-        // cielo / fondo
-        gsKit_prim_sprite(gs, 0, 0, SCREEN_W, GROUND_TOP - 20, 0, COL(60, 90, 150));
-        // suelo
-        gsKit_prim_sprite(gs, 0, GROUND_TOP - 20, SCREEN_W, SCREEN_H, 0, COL(90, 80, 70));
-
-        // ordenar por profundidad (el de mas abajo se dibuja encima)
-        if (!enemyAlive || player.y >= enemy.y) {
-            if (enemyAlive) drawFighter(gs, &enemy, 200, 40, 40);
-            drawFighter(gs, &player, 40, 120, 220);
+        if (state == STATE_MENU) {
+            updateMenu(navPressed, pressed);
+            drawMenu(gs);
         } else {
-            drawFighter(gs, &player, 40, 120, 220);
-            drawFighter(gs, &enemy, 200, 40, 40);
+            if (pressed & PAD_SELECT) resetGame();
+            if (pressed & PAD_START) paused = !paused;
+            if (paused && (pressed & PAD_CIRCLE)) {   // volver al menu desde la pausa
+                paused = 0;
+                state = STATE_MENU;
+                menuSel = 0;
+            }
+            if (!paused && state == STATE_GAME) {
+                updatePlayer(pressed, held, lx, ly);
+                updateEnemy();
+                checkHits();
+            }
+            drawGame(gs);
         }
-
-        // HUD
-        drawBar(gs, 20, 20, 200, player.hp, 100, 50, 220, 60);
-        drawBar(gs, 20, 40, 200, (int)mana, 100, 60, 120, 240);
-
-        // objeto seleccionado: cuadro de color + un punto por cada unidad
-        {
-            int cr[3] = {220, 60, 60}, cg[3] = {40, 120, 200}, cb[3] = {40, 240, 60};
-            gsKit_prim_sprite(gs, 20, 62, 44, 86, 11, COL(cr[selectedItem], cg[selectedItem], cb[selectedItem]));
-            for (int i = 0; i < itemCount[selectedItem]; i++)
-                gsKit_prim_sprite(gs, 52 + i * 10, 70, 58 + i * 10, 78, 11, COL(255, 255, 255));
-        }
-
-        // efecto de magia
-        if (magicTimer > 0 && (magicTimer / 2) % 2 == 0)
-            gsKit_prim_sprite(gs, player.x - 220, player.y - 70, player.x + 220, player.y - 40, 6, COL(255, 240, 80));
-
-        // pausa: dos barras en el centro
-        if (paused) {
-            gsKit_prim_sprite(gs, 295, 190, 315, 250, 20, COL(255, 255, 255));
-            gsKit_prim_sprite(gs, 335, 190, 355, 250, 20, COL(255, 255, 255));
-        }
-        if (enemyAlive) drawBar(gs, 420, 20, 200, enemy.hp, 60, 230, 160, 40);
 
         gsKit_queue_exec(gs);
         gsKit_sync_flip(gs);
