@@ -74,6 +74,13 @@ static void initPad(void) {
     do {
         state = padGetState(0, 0);
     } while (state != PAD_STATE_STABLE && state != PAD_STATE_FINDCTP1);
+
+    // pedir modo analogico (DualShock) y esperar a que se aplique
+    padSetMainMode(0, 0, PAD_MMODE_DUALSHOCK, PAD_MMODE_LOCK);
+    while (padGetReqState(0, 0) == PAD_RSTAT_BUSY) { }
+    do {
+        state = padGetState(0, 0);
+    } while (state != PAD_STATE_STABLE && state != PAD_STATE_FINDCTP1);
 }
 
 static void resetGame(void) {
@@ -286,8 +293,11 @@ int main(void) {
                 held = 0xffff ^ buttons.btns;
                 pressed = held & ~oldPad;
                 oldPad = held;
-                lx = buttons.ljoy_h;
-                ly = buttons.ljoy_v;
+                // usar el stick solo si el control esta en modo analogico
+                if (padInfoMode(0, 0, PAD_MODECURID, 0) == PAD_TYPE_DUALSHOCK) {
+                    lx = buttons.ljoy_h;
+                    ly = buttons.ljoy_v;
+                }
             }
         }
 
