@@ -1,5 +1,5 @@
 EE_BIN = beatemup.elf
-EE_OBJS = main.o
+EE_OBJS = main.o assets.o
 
 EE_INCS += -I$(PS2DEV)/gsKit/include
 EE_LDFLAGS += -L$(PS2DEV)/gsKit/lib
