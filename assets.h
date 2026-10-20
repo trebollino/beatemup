@@ -1,4 +1,4 @@
-// Generado automaticamente. No editar a mano.
+// Esto es una mierda odio arreglar el codigo
 #ifndef ASSETS_H
 #define ASSETS_H
 
@@ -54,5 +54,50 @@ extern const unsigned int btn2_glow_data[];
 #define BTN2_GLOW_H 56
 #define BTN2_GLOW_X 167
 #define BTN2_GLOW_Y 213
+
+typedef struct { short x, y, w, h, ox, oy; } SpriteFrame;
+extern const unsigned int sprites_data[];
+#define SPRITES_W 256
+#define SPRITES_H 720
+extern const SpriteFrame playerFrames[16];
+extern const SpriteFrame enemyFrames[7];
+extern const SpriteFrame iconFrames[5];
+#define PF_IDLE0 0
+#define PF_IDLE1 1
+#define PF_WALK0 2
+#define PF_WALK1 3
+#define PF_WALK2 4
+#define PF_WALK3 5
+#define PF_JUMP 6
+#define PF_L0 7
+#define PF_L1 8
+#define PF_L2 9
+#define PF_H0 10
+#define PF_H1 11
+#define PF_H2 12
+#define PF_H3 13
+#define PF_BLOCK 14
+#define PF_HURT 15
+#define EF_IDLE0 0
+#define EF_IDLE1 1
+#define EF_WALK0 2
+#define EF_WALK1 3
+#define EF_WALK2 4
+#define EF_WALK3 5
+#define EF_HURT 6
+#define I_HEAD_GREEN 0
+#define I_HEAD_GRAY 1
+#define I_POTION_RED 2
+#define I_POTION_BLUE 3
+#define I_FOOD 4
+
+extern const unsigned int font_data[];
+extern const unsigned char font_adv[95];
+#define FONT_W 352
+#define FONT_H 160
+#define FONT_CELL_W 22
+#define FONT_CELL_H 26
+#define FONT_COLS 16
+#define FONT_FIRST 32
 
 #endif
