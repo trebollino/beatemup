@@ -1,0 +1,19 @@
+name: Compilar PS2
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: ps2dev/ps2dev:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilar
+        run: make
+      - name: Guardar ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: beatemup-elf
+          path: beatemup.elf
