@@ -44,6 +44,9 @@ static char padBuf[256] __attribute__((aligned(64)));
 #ifdef USE_AUDIO
 extern unsigned char audsrv_irx[];
 extern unsigned int size_audsrv_irx;
+extern unsigned char freesd_irx[];
+extern unsigned int size_freesd_irx;
+static const char *audioStatus = "AUDIO: NO INICIADO";
 
 #define MAX_VOICES 6
 #define MIX_MAX 1024
@@ -57,19 +60,31 @@ static int curMusicLen = 0, musicPos = 0;
 
 static void initAudio(void) {
     int ret = 0;
-    int id = SifLoadModule("rom0:LIBSD", 0, NULL);
-    if (id < 0) { printf("No cargo LIBSD (%d)\n", id); return; }
+    int id = SifExecModuleBuffer(freesd_irx, size_freesd_irx, 0, NULL, &ret);
+    if (id < 0) { audioStatus = "AUDIO: ERROR FREESD"; return; }
     id = SifExecModuleBuffer(audsrv_irx, size_audsrv_irx, 0, NULL, &ret);
-    if (id < 0) { printf("No cargo audsrv.irx (%d)\n", id); return; }
-    if (audsrv_init() != 0) { printf("audsrv_init fallo\n"); return; }
+    if (id < 0) { audioStatus = "AUDIO: ERROR AUDSRV"; return; }
+
+    // esperar al servidor de audio, pero con limite de tiempo:
+    // si nunca aparece, el juego sigue sin sonido en vez de colgarse
+    SifRpcClientData_t cd;
+    int found = 0;
+    for (int i = 0; i < 200 && !found; i++) {
+        if (SifBindRpc(&cd, 0x870884, 0) >= 0 && cd.server != 0) found = 1;
+        else { for (volatile int d = 0; d < 1000000; d++) { } }
+    }
+    if (!found) { audioStatus = "AUDIO: SIN SERVIDOR"; return; }
+
+    if (audsrv_init() != 0) { audioStatus = "AUDIO: ERROR INIT"; return; }
     struct audsrv_fmt_t fmt;
     fmt.bits = 16;
     fmt.freq = AUDIO_RATE;
     fmt.channels = 1;
-    if (audsrv_set_format(&fmt) != AUDSRV_ERR_NOERROR) { printf("audsrv_set_format fallo\n"); return; }
+    if (audsrv_set_format(&fmt) != AUDSRV_ERR_NOERROR) { audioStatus = "AUDIO: ERROR FORMATO"; return; }
     audsrv_set_volume(MAX_VOLUME);
     audioCap = audsrv_available();
     audioOk = 1;
+    audioStatus = "AUDIO: OK";
 }
 
 static void startMenuMusic(void) { curMusic = (const short *)music_menu_data; curMusicLen = MUSIC_MENU_LEN; musicPos = 0; }
@@ -115,6 +130,7 @@ static void audioUpdate(void) {
     audsrv_play_audio((const char *)mix, n * 2);
 }
 #else
+static const char *audioStatus = "SIN AUDIO";
 enum { MAX_VOICES_DUMMY = 0 };
 static void initAudio(void) {}
 static void startMenuMusic(void) {}
@@ -632,6 +648,7 @@ static void drawMenu(GSGLOBAL *gs) {
 
     // textos
     drawText(gs, "X: ACEPTAR", 500, 410, 0.9f, 255, 255, 255);
+    drawText(gs, audioStatus, 16, 410, 0.8f, 255, 255, 120);
     if (soonTimer > 0) drawTextCentered(gs, "PROXIMAMENTE", 320, 330, 1.4f, 255, 230, 90);
 }
 
